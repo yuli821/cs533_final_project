@@ -69,8 +69,7 @@ class vit(nn.Module) :
     '''
     A small Vision Transformer (ViT)
     '''
-    def __init__(self, ipch=1, Nclasses=10, image_size=32, d_model=32,
-                nhead=4, patch_size=4, mlp_ratio=2.0) :
+    def __init__(self, ipch=1, Nclasses=10, image_size=32, d_model=32, nhead=4, patch_size=4, mlp_ratio=2.0) :
         '''
         Input:
         ipch - no. of input channels
@@ -86,7 +85,6 @@ class vit(nn.Module) :
         mlp = myMlp
         patchembed  = myPatchEmbed
         ffn_hidden = int(mlp_ratio*d_model)    #hidden dimension of MLP layer
-
         #--------------------------- First Layer ------------------------------#
         num_patches = int(image_size**2/patch_size**2)
         self.embedding = patchembed(img_size=image_size,    #convert image to tokens
@@ -105,16 +103,15 @@ class vit(nn.Module) :
         #--------------------------- Last Layer ------------------------------#
         self.fc = nn.Linear(in_features=d_model, out_features=Nclasses)
 
-    def forward(self, x) :
+    def forward(self, x, num_layers) :
         out = self.embedding(x)                                 #(B, Np, D)
         classtok = self.classembed.expand(x.size(0), -1, -1)    #change from (1, D) to (B, 1, D)
         out = torch.cat((classtok, out), dim=1)                 #(B, Np+1, D)
         out = out + self.posencode
-        out = out + self.attn1(self.norm1(out))    #residual connection
-        out = out + self.ffn1(self.norm2(out))    #residual connection
-        #second layer
-        out = out + self.attn1(self.norm1(out))    #residual connection
-        out = out + self.ffn1(self.norm2(out))    #residual connection
+
+        for _ in range(num_layers):
+            out = out + self.attn1(self.norm1(out))    #residual connection
+            out = out + self.ffn1(self.norm2(out))    #residual connection
 
         out = out[:,0]    #connect classifier head only to the class token embedding
         # print(out.shape)
