@@ -10,6 +10,7 @@ import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 from ViT import vit
+from torch.profiler import profile, record_function, ProfilerActivity
 torch._dynamo.config.optimize_ddp = False
 
 def setup(rank, world_size):
@@ -67,27 +68,36 @@ def get_vit_config(model_size):
     else:
         raise ValueError("Unsupported ViT model size")
 
-def trainepoch(model, num_layers, trainloader, criterion, opt, device) :
+def trainepoch(model, num_layers, trainloader, criterion, opt, device, rank) :
     epochloss = 0
     acc = 0
     total = 0
-    for b, (x,y) in enumerate(trainloader) :
-        x, y = x.to(device), y.to(device)
-        opt.zero_grad()
+    with profile(
+        activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA],
+        record_shapes=True,
+        profile_memory=True,
+        with_flops=True,
+        on_trace_ready=torch.profiler.tensorboard_trace_handler(f'./log/rank_{rank}')
+    ) as prof:
+        for b, (x,y) in enumerate(trainloader) :
+            x, y = x.to(device), y.to(device)
+            opt.zero_grad()
 
-        #forward pass
-        logits = model(x, num_layers)
-        predicted = torch.argmax(logits, dim=-1)
-        acc += torch.eq(predicted, y).sum()
-        total += y.shape[0]
-        #backward pass
-        loss = criterion(logits, y)
-        loss.backward()
-        opt.step()
-
-        #accumulated loss
-        print("GPU ", device, " ", "Batch ", b, "--------- loss = ", loss.item())
-        epochloss += loss
+            #forward pass
+            with record_function("forward"):
+                logits = model(x, num_layers)
+            predicted = torch.argmax(logits, dim=-1)
+            acc += torch.eq(predicted, y).sum()
+            total += y.shape[0]
+            #backward pass
+            loss = criterion(logits, y)
+            with record_function("backward"):
+                loss.backward()
+            opt.step()
+            prof.step()
+            #accumulated loss
+            print("GPU ", device, " ", "Batch ", b, "--------- loss = ", loss.item())
+            epochloss += loss
     return model, epochloss/b, acc/total
 
 # def trainepoch(model, num_layers, trainloader, criterion, opt, device):
@@ -131,7 +141,7 @@ def train(rank, world_size, model_size='base16', num_epoch=5, use_optimization=F
     model.train()
     for epoch in range(num_epoch):
         train_sampler.set_epoch(epoch)
-        model, loss, acc = trainepoch(model, config["num_layers"], trainloader, criterion, optimizer, device)
+        model, loss, acc = trainepoch(model, config["num_layers"], trainloader, criterion, optimizer, device, rank)
         scheduler.step()
         if rank == 0:
             print(f"[GPU {rank}] Epoch {epoch} - Loss: {loss:.4f}, Accuracy: {acc*100:.2f}%")
