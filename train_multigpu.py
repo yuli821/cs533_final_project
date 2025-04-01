@@ -14,8 +14,8 @@ from torch.profiler import profile, record_function, ProfilerActivity
 # torch._dynamo.config.optimize_ddp = False
 
 def setup(rank, world_size):
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12355'
+    # os.environ['MASTER_ADDR'] = 'localhost'
+    # os.environ['MASTER_PORT'] = '12355'
     torch.cuda.set_device(rank)
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
 
@@ -35,8 +35,8 @@ def getdata(dataset='cifar10', batch_size=128, num_workers=4, rank=0, world_size
             transforms.Normalize([0.4914, 0.4822, 0.4465], [0.2471, 0.2435, 0.2616]),
         ])
 
-        trainset = datasets.CIFAR10(root="/home/jykang5/cifar10_datasets/", train=True, transform=train_transform, download=False)
-        testset = datasets.CIFAR10(root="/home/jykang5/cifar10_datasets/", train=False, transform=test_transform, download=False)
+        trainset = datasets.CIFAR10(root="/projects/beih/yuli9/datasets", train=True, transform=train_transform, download=False)
+        testset = datasets.CIFAR10(root="/projects/beih/yuli9/datasets", train=False, transform=test_transform, download=False)
 
         train_sampler = DistributedSampler(trainset, num_replicas=world_size, rank=rank)
         trainloader = DataLoader(trainset, batch_size=batch_size, sampler=train_sampler, num_workers=num_workers, pin_memory=True)
@@ -77,7 +77,7 @@ def trainepoch(model, num_layers, trainloader, criterion, opt, device, rank, run
         record_shapes=True,
         profile_memory=True,
         with_flops=True,
-        on_trace_ready=torch.profiler.tensorboard_trace_handler(f'/storage2/jykang5/cs533_final_project/log/{run_name}/rank_{rank}')
+        on_trace_ready=torch.profiler.tensorboard_trace_handler(f'/u/yuli9/cs533_final_project/log/{run_name}/rank_{rank}')
     ) as prof:
         for b, (x,y) in enumerate(trainloader) :
             x, y = x.to(device), y.to(device)
@@ -99,22 +99,6 @@ def trainepoch(model, num_layers, trainloader, criterion, opt, device, rank, run
             print("GPU ", device, " ", "Batch ", b, "--------- loss = ", loss.item())
             epochloss += loss
     return model, epochloss/b, acc/total
-
-# def trainepoch(model, num_layers, trainloader, criterion, opt, device):
-#     model.train()
-#     epochloss, acc, total = 0, 0, 0
-#     for x, y in trainloader:
-#         x, y = x.to(device), y.to(device)
-#         opt.zero_grad()
-#         logits = model(x, num_layers)
-#         predicted = torch.argmax(logits, dim=-1)
-#         acc += (predicted == y).sum()
-#         total += y.size(0)
-#         loss = criterion(logits, y)
-#         loss.backward()
-#         opt.step()
-#         epochloss += loss.item()
-#     return epochloss / len(trainloader), acc.item() / total
 
 def train(rank, world_size, model_size='base16', num_epoch=5, use_optimization=False):
     run_name = f"{model_size}_{'opt' if use_optimization else 'noopt'}"
@@ -157,7 +141,7 @@ def train(rank, world_size, model_size='base16', num_epoch=5, use_optimization=F
             print(f"[GPU {rank}] Epoch {epoch} - Loss: {loss:.4f}, Accuracy: {acc*100:.2f}%")
 
     if rank == 0:
-        torch.save(model.module.state_dict(), f"/home/jykang5/cs533_final_project/models/cifar10/final_{model_size}.pt")
+        torch.save(model.module.state_dict(), f"/u/yuli9/cs533_final_project/models/cifar10/final_{model_size}.pt")
 
     cleanup()
 
@@ -165,13 +149,13 @@ def main():
     world_size = torch.cuda.device_count()
     use_optimization = True  # Toggle this flag to enable/disable comm optimization
     model_size = 'huge16'      # Change to 'large' or 'huge' as needed
-    num_epoch = 5
+    num_epoch = 10
     # mp.spawn(train, args=(world_size, model_size, num_epoch, use_optimization), nprocs=world_size, join=True)
     print("\n[INFO] Running WITHOUT communication optimization\n")
     mp.spawn(train, args=(world_size, model_size, num_epoch, False), nprocs=world_size, join=True)
 
-    print("\n[INFO] Running WITH communication optimization\n")
-    mp.spawn(train, args=(world_size, model_size, num_epoch, True), nprocs=world_size, join=True)
+    # print("\n[INFO] Running WITH communication optimization\n")
+    # mp.spawn(train, args=(world_size, model_size, num_epoch, True), nprocs=world_size, join=True)
 
 if __name__ == "__main__":
     main()
