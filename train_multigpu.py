@@ -11,7 +11,10 @@ import torch.optim as optim
 import numpy as np
 from ViT import vit
 from torch.profiler import profile, record_function, ProfilerActivity
+from utils import WarmupLinearSchedule
 # torch._dynamo.config.optimize_ddp = False
+torch._dynamo.config.automatic_dynamic_shapes = False
+dataset = 'cifar100'
 
 def setup(rank, world_size):
     # os.environ['MASTER_ADDR'] = 'localhost'
@@ -22,25 +25,36 @@ def setup(rank, world_size):
 def cleanup():
     dist.destroy_process_group()
 
-def getdata(dataset='cifar10', batch_size=128, num_workers=4, rank=0, world_size=1):
+def getdata(dataset='cifar10', image_size=32, batch_size=128, num_workers=4, rank=0, world_size=1):
+    train_transform = transforms.Compose([transforms.RandomCrop(image_size, image_size),
+                                            transforms.RandomHorizontalFlip(),
+                                            transforms.ToTensor(),
+                                            transforms.Normalize(mean=[0.4914, 0.4822, 0.4465],
+                                                                std=[0.2471, 0.2435, 0.2616]),
+                                            ])
+    test_transform = transforms.Compose([transforms.Resize((image_size, image_size)),
+                                        transforms.ToTensor(),
+                                        transforms.Normalize(mean=[0.4914, 0.4822, 0.4465],
+                                                                std=[0.2471, 0.2435, 0.2616]),
+                                            ])
     if dataset == 'cifar10':
-        train_transform = transforms.Compose([
-            transforms.RandomCrop(32),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize([0.4914, 0.4822, 0.4465], [0.2471, 0.2435, 0.2616]),
-        ])
-        test_transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize([0.4914, 0.4822, 0.4465], [0.2471, 0.2435, 0.2616]),
-        ])
-
         trainset = datasets.CIFAR10(root="/projects/beih/yuli9/datasets", train=True, transform=train_transform, download=False)
         testset = datasets.CIFAR10(root="/projects/beih/yuli9/datasets", train=False, transform=test_transform, download=False)
 
         train_sampler = DistributedSampler(trainset, num_replicas=world_size, rank=rank)
+        test_sampler = SequentialSampler(testset)
         trainloader = DataLoader(trainset, batch_size=batch_size, sampler=train_sampler, num_workers=num_workers, pin_memory=True)
-        testloader = DataLoader(testset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
+        testloader = DataLoader(testset, batch_size=batch_size, sampler=test_sampler, shuffle=False, num_workers=num_workers, pin_memory=True)
+    elif dataset == "cifar100":
+        #training and test dataset
+        trainset = datasets.CIFAR100(root="/projects/beih/yuli9/datasets/", train=True, transform=train_transform, download=True)
+        testset = datasets.CIFAR100(root="/projects/beih/yuli9/datasets/", train=False, transform=test_transform, download=True)
+
+        #train and test dataloaders
+        train_sampler = DistributedSampler(trainset, num_replicas=world_size, rank=rank)
+        test_sampler = SequentialSampler(testset)
+        trainloader = DataLoader(dataset=trainset, batch_size=batch_size, sampler=train_sampler, shuffle=True, pin_memory=True, num_workers=num_workers)
+        testloader = DataLoader(dataset=testset, batch_size=eval_batch_size, sampler=test_sampler, shuffle=False, pin_memory=True, num_workers=num_workers)
     else:
         raise ValueError("Dataset not supported")
 
@@ -68,7 +82,7 @@ def get_vit_config(model_size):
     else:
         raise ValueError("Unsupported ViT model size")
 
-def trainepoch(model, num_layers, trainloader, criterion, opt, device, rank, run_name) :
+def trainepoch(model, trainloader, criterion, opt, device, rank, run_name) :
     epochloss = 0
     acc = 0
     total = 0
@@ -85,7 +99,7 @@ def trainepoch(model, num_layers, trainloader, criterion, opt, device, rank, run
 
             #forward pass
             with record_function("forward"):
-                logits = model(x, num_layers)
+                logits = model(x)
             predicted = torch.argmax(logits, dim=-1)
             acc += torch.eq(predicted, y).sum()
             total += y.shape[0]
@@ -104,16 +118,22 @@ def train(rank, world_size, model_size='base16', num_epoch=5, use_optimization=F
     run_name = f"{model_size}_{'opt' if use_optimization else 'noopt'}"
     setup(rank, world_size)
     torch.manual_seed(0)
+    torch.cuda.manual_seed_all(0)
     np.random.seed(0)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
     device = torch.device(f"cuda:{rank}")
+    print("Beginning training on ", device)
 
-    trainloader, testloader, train_sampler = getdata(batch_size=128, rank=rank, world_size=world_size)
+    nclasses = 100 if dataset == 'cifar100' else 10
+
+    trainloader, testloader, train_sampler = getdata(image_size=image_size, batch_size=128, rank=rank, world_size=world_size)
 
     config = get_vit_config(model_size)
     assert config["mlp_dim"] % config["d_model"] == 0
     mlp_ratio = config["mlp_dim"] / config["d_model"]
-    model = vit(ipch=3, image_size=32, patch_size=config["patch_size"],d_model=config["d_model"], nhead=config["nhead"], mlp_ratio=mlp_ratio).to(device)
-    torch.compile(model)
+    model = vit(ipch=3, image_size=image_size, Nclasses=nclasses, num_layers=conofig["num_layers"], patch_size=config["patch_size"],d_model=config["d_model"], nhead=config["nhead"], mlp_ratio=mlp_ratio).to(device)
+
     if use_optimization:
         # model = DDP(model, device_ids=[rank], bucket_cap_mb=25, find_unused_parameters=True)
         # torch._dynamo.config.optimize_ddp: general optimization on operator fusion, loop unrolling, and memory reuse inside DDP
@@ -130,26 +150,26 @@ def train(rank, world_size, model_size='base16', num_epoch=5, use_optimization=F
 
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.SGD(model.parameters(), lr=0.1, momentum=0.9, weight_decay=5e-4)
-    scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[2, 4], gamma=0.1)
+    scheduler = WarmupLinearSchedule(optimizer, warmup_steps=1, t_total=num_epoch)
 
     model.train()
     for epoch in range(num_epoch):
         train_sampler.set_epoch(epoch)
-        model, loss, acc = trainepoch(model, config["num_layers"], trainloader, criterion, optimizer, device, rank, run_name)
+        model, loss, acc = trainepoch(model, trainloader, criterion, optimizer, device, rank, run_name)
         scheduler.step()
         if rank == 0:
             print(f"[GPU {rank}] Epoch {epoch} - Loss: {loss:.4f}, Accuracy: {acc*100:.2f}%")
 
     if rank == 0:
-        torch.save(model.module.state_dict(), f"/u/yuli9/cs533_final_project/models/cifar10/final_{model_size}.pt")
+        torch.save(model.module.state_dict(), f"/u/yuli9/cs533_final_project/models/{dataset}/final_{model_size}.pt")
 
     cleanup()
 
 def main():
     world_size = torch.cuda.device_count()
     use_optimization = True  # Toggle this flag to enable/disable comm optimization
-    model_size = 'huge16'      # Change to 'large' or 'huge' as needed
-    num_epoch = 10
+    model_size = 'base32'      # Change to 'large' or 'huge' as needed
+    num_epoch = 1
     # mp.spawn(train, args=(world_size, model_size, num_epoch, use_optimization), nprocs=world_size, join=True)
     print("\n[INFO] Running WITHOUT communication optimization\n")
     mp.spawn(train, args=(world_size, model_size, num_epoch, False), nprocs=world_size, join=True)

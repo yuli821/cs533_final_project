@@ -59,6 +59,6 @@ def print_report(results):
         print(f"{config:<20} | {comm_ms:15.2f} | {total_ms:15.2f} | {percent:8.2f}%")
 
 if __name__ == "__main__":
-    log_dir = "/storage2/jykang5/cs533_final_project/log"
+    log_dir = "./log"
     results = analyze_logs(log_dir)
     print_report(results)

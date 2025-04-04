@@ -6,9 +6,9 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=64
 #SBATCH --gpu-bind=closest
-#SBATCH --gpus-per-node=4
+#SBATCH --gpus-per-node=1
 #SBATCH --mem=128G
-#SBATCH --partition=gpuA40x4-interactive
+#SBATCH --partition=gpuA40x4
 #SBATCH --account=beih-delta-gpu
 #SBATCH --output=training.out
  
@@ -27,4 +27,4 @@ master_addr=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
 export MASTER_ADDR=$master_addr
 echo "MASTER_ADDR="$MASTER_ADDR
 
-srun python3 $HOME/cs533_final_project/train_multigpu.py
+srun python3 $HOME/cs533_final_project/train.py

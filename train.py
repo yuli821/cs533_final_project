@@ -1,63 +1,11 @@
-from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
 import torch.nn as nn
 import torch.optim as optim
 import torch
 import numpy as np
 from ViT import vit
+from utils import WarmupLinearSchedule, getdata
 
-#This file uses pytorch implementation of dataloader and train the ViT model in single GPU
-# Pytorch dataloader
-def getdata(dataset='cifar10', batch_size=128, eval_batch_size=128, num_workers=4) :
-    '''
-    get desired training and inference dataloaders
-    Inputs:
-    dataset - name of dataset
-    batch_size -
-    num_workers - no. of parallel processes
-    Outputs:
-    trainloader -
-    testloader -
-    '''
-    if dataset == 'cifar10' :
-        #pre-processing transforms
-        train_transform = transforms.Compose([transforms.RandomCrop(size=32),
-                                              transforms.RandomHorizontalFlip(),
-                                              transforms.ToTensor(),
-                                              transforms.Normalize(mean=[0.4914, 0.4822, 0.4465],
-                                                                  std=[0.2471, 0.2435, 0.2616]),
-                                              ])
-        test_transform = transforms.Compose([transforms.ToTensor(),
-                                            transforms.Normalize(mean=[0.4914, 0.4822, 0.4465],
-                                                                  std=[0.2471, 0.2435, 0.2616]),
-                                              ])
-
-        #training and test dataset
-        trainset = datasets.CIFAR10(root="../datasets/",
-                                    train=True,
-                                    transform=train_transform,
-                                    download=True)
-        testset = datasets.CIFAR10(root="../datasets/",
-                                  train=False,
-                                  transform=test_transform,
-                                  download=True)
-
-        #train and test dataloaders
-        trainloader = DataLoader(dataset=trainset,
-                                batch_size=batch_size,
-                                shuffle=True,
-                                pin_memory=True,
-                                num_workers=2)
-        testloader = DataLoader(dataset=testset,
-                                batch_size=eval_batch_size,
-                                shuffle=False,
-                                pin_memory=True,
-                                num_workers=2)
-    else :
-        print("Dataset not defined")
-        trainloader, testloader = None, None
-    return trainloader, testloader
-
+dataset = 'cifar100'
 def trainepoch(model, trainloader, criterion, opt, device) :
     '''
     Train 1 epoch
@@ -86,10 +34,12 @@ def trainepoch(model, trainloader, criterion, opt, device) :
         #backward pass
         loss = criterion(logits, y)
         loss.backward()
+        clip = 5
+        torch.nn.utils.clip_grad_norm(model.parameters(),clip)
         opt.step()
 
         #accumulated loss
-        #print("Batch ", b, "--------- loss = ", loss.item())
+        print("Batch ", b, "--------- loss = ", loss.item())
         epochloss += loss
 
     return model, epochloss/b, acc/total
@@ -128,9 +78,10 @@ def train(model, trainloader, device, epochs=5, loss='CE', optimizer='SGD', lr=0
         return None, None
 
     #learning rate scheduler
-    scheduler = optim.lr_scheduler.MultiStepLR(optimizer=opt,
-                                                     milestones=[epochs//2, int(3*epochs//4)],
-                                                     gamma=0.1)
+    # scheduler = optim.lr_scheduler.MultiStepLR(optimizer=opt,
+    #                                                  milestones=[epochs//2, int(3*epochs//4)],
+    #                                                  gamma=0.1)
+    scheduler = WarmupLinearSchedule(opt, warmup_steps=1, t_total=epochs)
 
     loss = []
     accumulate = 0.0
@@ -145,7 +96,7 @@ def train(model, trainloader, device, epochs=5, loss='CE', optimizer='SGD', lr=0
         if (i+1) % 5 == 0:
           acc.append(accumulate/5.0)
           accumulate = 0.0
-    torch.save(model.state_dict(), "../models/cifar10/final.pt")
+    torch.save(model.state_dict(), f"/u/yuli9/cs533_final_project/models/{dataset}/final.pt")
     return model, epochloss, loss, acc
 
 def test(model, testloader, device, loadpath=None) :
@@ -192,20 +143,27 @@ def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print("Beginning training on ", device)
 
-    dataset = 'cifar10'
+    nclasses = 100 if dataset == 'cifar100' else 10
     ipch = 3
-    image_size = 32
+    image_size = 224
+    num_layers = 32
+    d_model = 1280
+    mlp_ratio = 5120/1280
+    nheads = 16
+    patch_size = 32
+    num_epoch=1
 
-    trainloader, testloader = getdata(dataset)
+    trainloader, testloader = getdata(dataset, image_size)
     print("Training: no. of batches = ", len(trainloader), "no. of samples = ", len(trainloader.dataset))
     print("Inference: no. of batches = ", len(testloader), "no. of samples = ", len(testloader.dataset))
 
-    model = vit(ipch=ipch, image_size=image_size, d_model=16, nhead=4).to(device)
-    model, finalloss, loss, accuracy = train(model, trainloader, device, epochs=5, lr=0.1)
+    model = vit(ipch=ipch, Nclasses=nclasses, image_size=image_size, num_layers=num_layers, patch_size=patch_size, d_model=d_model, nhead=nheads, mlp_ratio = mlp_ratio).to(device)
+    model, finalloss, loss, accuracy = train(model, trainloader, device, epochs=num_epoch, lr=2e-4)
 
     print("\nFinal avg. training loss: %.3f" %(finalloss.item()))
-    acc = test(model, testloader, device, loadpath="../models/cifar10/final.pt")
+    acc = test(model, testloader, device, loadpath=f"/u/yuli9/cs533_final_project/models/{dataset}/final.pt")
     print("Final model accuracy = ", acc*100, "%")
+    return 0
 
 
 if __name__ == "__main__":
