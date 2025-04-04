@@ -170,7 +170,7 @@ def main():
     use_optimization = True  # Toggle this flag to enable/disable comm optimization
     model_size = 'base32'      # Change to 'large' or 'huge' as needed
     num_epoch = 1
-    # mp.spawn(train, args=(world_size, model_size, num_epoch, use_optimization), nprocs=world_size, join=True)
+
     print("\n[INFO] Running WITHOUT communication optimization\n")
     mp.spawn(train, args=(world_size, model_size, num_epoch, False), nprocs=world_size, join=True)
 

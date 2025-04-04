@@ -64,8 +64,7 @@ def getdata(dataset='cifar10', image_size=32, batch_size=128, eval_batch_size=12
                                         transforms.Normalize(mean=[0.4914, 0.4822, 0.4465],
                                                                 std=[0.2471, 0.2435, 0.2616]),
                                             ])
-    train_sampler = RandomSampler(trainset)
-    test_sampler = SequentialSampler(testset)
+
     if dataset == 'cifar10' :
         #training and test dataset
         trainset = datasets.CIFAR10(root="/projects/beih/yuli9/datasets/",
@@ -77,6 +76,8 @@ def getdata(dataset='cifar10', image_size=32, batch_size=128, eval_batch_size=12
                                   transform=test_transform,
                                   download=True)
 
+        train_sampler = RandomSampler(trainset)
+        test_sampler = SequentialSampler(testset)
         #train and test dataloaders
         trainloader = DataLoader(dataset=trainset,
                                 batch_size=batch_size,
@@ -101,6 +102,8 @@ def getdata(dataset='cifar10', image_size=32, batch_size=128, eval_batch_size=12
                                   transform=test_transform,
                                   download=True)
 
+        train_sampler = RandomSampler(trainset)
+        test_sampler = SequentialSampler(testset)
         #train and test dataloaders
         trainloader = DataLoader(dataset=trainset,
                                 batch_size=batch_size,
