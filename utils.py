@@ -108,13 +108,11 @@ def getdata(dataset='cifar10', image_size=32, batch_size=128, eval_batch_size=12
         trainloader = DataLoader(dataset=trainset,
                                 batch_size=batch_size,
                                 sampler = train_sampler,
-                                shuffle=True,
                                 pin_memory=True,
                                 num_workers=num_workers)
         testloader = DataLoader(dataset=testset,
                                 batch_size=eval_batch_size,
                                 sampler = test_sampler,
-                                shuffle=False,
                                 pin_memory=True,
                                 num_workers=num_workers)
     else :

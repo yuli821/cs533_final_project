@@ -15,6 +15,8 @@ from utils import WarmupLinearSchedule
 # torch._dynamo.config.optimize_ddp = False
 torch._dynamo.config.automatic_dynamic_shapes = False
 dataset = 'cifar100'
+image_size = 32
+batch_size = 64
 
 def setup(rank, world_size):
     # os.environ['MASTER_ADDR'] = 'localhost'
@@ -25,7 +27,7 @@ def setup(rank, world_size):
 def cleanup():
     dist.destroy_process_group()
 
-def getdata(dataset='cifar10', image_size=32, batch_size=128, num_workers=4, rank=0, world_size=1):
+def getdata(dataset='cifar10', image_size=32, batch_size=batch_size, num_workers=4, rank=0, world_size=1):
     train_transform = transforms.Compose([transforms.RandomCrop(image_size, image_size),
                                             transforms.RandomHorizontalFlip(),
                                             transforms.ToTensor(),
@@ -42,9 +44,8 @@ def getdata(dataset='cifar10', image_size=32, batch_size=128, num_workers=4, ran
         testset = datasets.CIFAR10(root="/projects/beih/yuli9/datasets", train=False, transform=test_transform, download=False)
 
         train_sampler = DistributedSampler(trainset, num_replicas=world_size, rank=rank)
-        test_sampler = SequentialSampler(testset)
         trainloader = DataLoader(trainset, batch_size=batch_size, sampler=train_sampler, num_workers=num_workers, pin_memory=True)
-        testloader = DataLoader(testset, batch_size=batch_size, sampler=test_sampler, shuffle=False, num_workers=num_workers, pin_memory=True)
+        testloader = DataLoader(testset, batch_size=batch_size, num_workers=num_workers, pin_memory=True)
     elif dataset == "cifar100":
         #training and test dataset
         trainset = datasets.CIFAR100(root="/projects/beih/yuli9/datasets/", train=True, transform=train_transform, download=True)
@@ -52,9 +53,8 @@ def getdata(dataset='cifar10', image_size=32, batch_size=128, num_workers=4, ran
 
         #train and test dataloaders
         train_sampler = DistributedSampler(trainset, num_replicas=world_size, rank=rank)
-        test_sampler = SequentialSampler(testset)
         trainloader = DataLoader(dataset=trainset, batch_size=batch_size, sampler=train_sampler, shuffle=True, pin_memory=True, num_workers=num_workers)
-        testloader = DataLoader(dataset=testset, batch_size=eval_batch_size, sampler=test_sampler, shuffle=False, pin_memory=True, num_workers=num_workers)
+        testloader = DataLoader(dataset=testset, batch_size=eval_batch_size, pin_memory=True, num_workers=num_workers)
     else:
         raise ValueError("Dataset not supported")
 
@@ -127,12 +127,12 @@ def train(rank, world_size, model_size='base16', num_epoch=5, use_optimization=F
 
     nclasses = 100 if dataset == 'cifar100' else 10
 
-    trainloader, testloader, train_sampler = getdata(image_size=image_size, batch_size=128, rank=rank, world_size=world_size)
+    trainloader, testloader, train_sampler = getdata(image_size=image_size, batch_size=batch_size, rank=rank, world_size=world_size)
 
     config = get_vit_config(model_size)
     assert config["mlp_dim"] % config["d_model"] == 0
     mlp_ratio = config["mlp_dim"] / config["d_model"]
-    model = vit(ipch=3, image_size=image_size, Nclasses=nclasses, num_layers=conofig["num_layers"], patch_size=config["patch_size"],d_model=config["d_model"], nhead=config["nhead"], mlp_ratio=mlp_ratio).to(device)
+    model = vit(ipch=3, image_size=image_size, Nclasses=nclasses, num_layers=config["num_layers"], patch_size=config["patch_size"],d_model=config["d_model"], nhead=config["nhead"], mlp_ratio=mlp_ratio).to(device)
 
     if use_optimization:
         # model = DDP(model, device_ids=[rank], bucket_cap_mb=25, find_unused_parameters=True)
@@ -149,7 +149,7 @@ def train(rank, world_size, model_size='base16', num_epoch=5, use_optimization=F
         model = DDP(model, device_ids=[rank], find_unused_parameters=False, gradient_as_bucket_view=False)
 
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.SGD(model.parameters(), lr=0.1, momentum=0.9, weight_decay=5e-4)
+    optimizer = optim.SGD(model.parameters(), lr=3e-4, momentum=0.9, weight_decay=5e-4)
     scheduler = WarmupLinearSchedule(optimizer, warmup_steps=1, t_total=num_epoch)
 
     model.train()
@@ -168,8 +168,8 @@ def train(rank, world_size, model_size='base16', num_epoch=5, use_optimization=F
 def main():
     world_size = torch.cuda.device_count()
     use_optimization = True  # Toggle this flag to enable/disable comm optimization
-    model_size = 'base32'      # Change to 'large' or 'huge' as needed
-    num_epoch = 1
+    model_size = 'huge4'      # Change to 'large' or 'huge' as needed
+    num_epoch = 5
 
     print("\n[INFO] Running WITHOUT communication optimization\n")
     mp.spawn(train, args=(world_size, model_size, num_epoch, False), nprocs=world_size, join=True)
