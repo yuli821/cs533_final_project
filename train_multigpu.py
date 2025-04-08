@@ -14,6 +14,7 @@ from torch.profiler import profile, record_function, ProfilerActivity
 from utils import WarmupLinearSchedule
 # torch._dynamo.config.optimize_ddp = False
 torch._dynamo.config.automatic_dynamic_shapes = False
+torch.set_float32_matmul_precision('high')
 dataset = 'cifar100'
 image_size = 32
 batch_size = 64
@@ -82,46 +83,59 @@ def get_vit_config(model_size):
     else:
         raise ValueError("Unsupported ViT model size")
 
-def trainepoch(model, trainloader, criterion, opt, device, rank, run_name) :
+def trainepoch(model, epoch, trainloader, criterion, opt, device, rank, run_name) :
     epochloss = 0
     acc = 0
     total = 0
-    with profile(
-        activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA],
-        record_shapes=True,
-        profile_memory=True,
-        with_flops=True,
-        on_trace_ready=torch.profiler.tensorboard_trace_handler(f'/u/yuli9/cs533_final_project/log/{run_name}/rank_{rank}')
-    ) as prof:
+    if epoch == 1:
+        with profile(
+            activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            record_shapes=True,
+            profile_memory=True,
+            with_flops=True,
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(f'/u/yuli9/cs533_final_project/log/{run_name}/rank_{rank}')
+        ) as prof:
+            for b, (x,y) in enumerate(trainloader) :
+                x, y = x.to(device), y.to(device)
+
+                #forward pass
+                with record_function("forward"):
+                    logits = model(x)
+                predicted = torch.argmax(logits, dim=-1)
+                acc += torch.eq(predicted, y).sum()
+                total += y.shape[0]
+                #backward pass
+                loss = criterion(logits, y)
+                with record_function("backward"):
+                    loss.backward()
+                opt.step()
+                opt.zero_grad(set_to_none=True)
+                prof.step()
+                #accumulated loss
+                print("GPU ", device, " ", "Batch ", b, "--------- loss = ", loss.item())
+                epochloss += loss.item()
+    else: 
         for b, (x,y) in enumerate(trainloader) :
             x, y = x.to(device), y.to(device)
-            opt.zero_grad()
 
             #forward pass
-            with record_function("forward"):
-                logits = model(x)
+            logits = model(x)
             predicted = torch.argmax(logits, dim=-1)
             acc += torch.eq(predicted, y).sum()
             total += y.shape[0]
             #backward pass
             loss = criterion(logits, y)
-            with record_function("backward"):
-                loss.backward()
+            loss.backward()
             opt.step()
-            prof.step()
+            opt.zero_grad(set_to_none=True)
             #accumulated loss
             print("GPU ", device, " ", "Batch ", b, "--------- loss = ", loss.item())
-            epochloss += loss
+            epochloss += loss.item()
     return model, epochloss/b, acc/total
 
 def train(rank, world_size, model_size='base16', num_epoch=5, use_optimization=False):
     run_name = f"{model_size}_{'opt' if use_optimization else 'noopt'}"
     setup(rank, world_size)
-    torch.manual_seed(0)
-    torch.cuda.manual_seed_all(0)
-    np.random.seed(0)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
     device = torch.device(f"cuda:{rank}")
     print("Beginning training on ", device)
 
@@ -149,13 +163,13 @@ def train(rank, world_size, model_size='base16', num_epoch=5, use_optimization=F
         model = DDP(model, device_ids=[rank], find_unused_parameters=False, gradient_as_bucket_view=False)
 
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.SGD(model.parameters(), lr=3e-4, momentum=0.9, weight_decay=5e-4)
+    optimizer = optim.SGD(model.parameters(), lr=3e-3, momentum=0.9, weight_decay=0.3)
     scheduler = WarmupLinearSchedule(optimizer, warmup_steps=1, t_total=num_epoch)
 
     model.train()
     for epoch in range(num_epoch):
         train_sampler.set_epoch(epoch)
-        model, loss, acc = trainepoch(model, trainloader, criterion, optimizer, device, rank, run_name)
+        model, loss, acc = trainepoch(model, epoch, trainloader, criterion, optimizer, device, rank, run_name)
         scheduler.step()
         if rank == 0:
             print(f"[GPU {rank}] Epoch {epoch} - Loss: {loss:.4f}, Accuracy: {acc*100:.2f}%")
@@ -168,8 +182,13 @@ def train(rank, world_size, model_size='base16', num_epoch=5, use_optimization=F
 def main():
     world_size = torch.cuda.device_count()
     use_optimization = True  # Toggle this flag to enable/disable comm optimization
-    model_size = 'huge4'      # Change to 'large' or 'huge' as needed
+    model_size = 'huge16'      # Change to 'large' or 'huge' as needed
     num_epoch = 5
+    torch.manual_seed(0)
+    torch.cuda.manual_seed_all(0)
+    np.random.seed(0)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
     print("\n[INFO] Running WITHOUT communication optimization\n")
     mp.spawn(train, args=(world_size, model_size, num_epoch, False), nprocs=world_size, join=True)

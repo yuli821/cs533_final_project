@@ -27,4 +27,4 @@ master_addr=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
 export MASTER_ADDR=$master_addr
 echo "MASTER_ADDR="$MASTER_ADDR
 
-srun python3 $HOME/cs533_final_project/train_multigpu.py
+srun python3 $HOME/cs533_final_project/train_multigpu.py nvidia-smi
