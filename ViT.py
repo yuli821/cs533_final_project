@@ -28,6 +28,7 @@ class myMlp(nn.Module) :
     '''
     def __init__(self, in_features=16, hidden_features=64, out_features=16, act_layer=nn.functional.gelu):
         super().__init__()
+        assert in_features == out_features, "MLP input/output dim mismatch!"
         self.linear1 = nn.Linear(in_features=in_features, out_features=hidden_features)
         self.act = act_layer
         self.linear2 = nn.Linear(in_features=hidden_features, out_features=out_features)
@@ -68,7 +69,22 @@ class myAttention(nn.Module) :
         out = self.proj(out)                                                       #(B, N, D)         dpdim: D
 
         return out
-    
+
+class TransformerBlock(nn.Module):
+    def __init__(self, d_model, nhead, mlp_ratio=4.0):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(d_model)
+        self.attn = myAttention(dim=d_model, nhead=nhead)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.ffn = myMlp(in_features=d_model,
+                         hidden_features=int(d_model * mlp_ratio),
+                         out_features=d_model)
+
+    def forward(self, x):
+        x = x + self.attn(self.norm1(x))
+        x = x + self.ffn(self.norm2(x))
+        return x
+
 class vit(nn.Module) :
     '''
     A small Vision Transformer (ViT)
@@ -85,10 +101,10 @@ class vit(nn.Module) :
         '''
         super().__init__()
         #library v/s self-implemented version
-        attention = myAttention
-        mlp = myMlp
+        # attention = myAttention
+        # mlp = myMlp
         patchembed  = myPatchEmbed
-        ffn_hidden = int(mlp_ratio*d_model)    #hidden dimension of MLP layer
+        # ffn_hidden = int(mlp_ratio*d_model)    #hidden dimension of MLP layer
         #--------------------------- First Layer ------------------------------#
         num_patches = int(image_size**2/patch_size**2)
         self.embedding = patchembed(img_size=image_size,    #convert image to tokens
@@ -105,14 +121,16 @@ class vit(nn.Module) :
         # self.norm2 = nn.LayerNorm(d_model)                                                     #layernorm
         # self.ffn1 = mlp(in_features=d_model, hidden_features=ffn_hidden, out_features=d_model, act_layer=nn.ReLU)    #mlp
         for _ in range(num_layers):
-            block = nn.Sequential(
-                    nn.LayerNorm(d_model, eps=1e-6),
-                    attention(dim=d_model, nhead=nhead, qkv_bias=True),
-                    nn.LayerNorm(d_model, eps=1e-6),
-                    mlp(in_features=d_model, hidden_features=ffn_hidden, out_features=d_model, act_layer=nn.functional.gelu))
-            self.blocks.append(copy.deepcopy(block))
+            self.blocks.append(TransformerBlock(d_model, nhead, mlp_ratio))
+            # block = nn.Sequential(
+            #         nn.LayerNorm(d_model, eps=1e-6),
+            #         attention(dim=d_model, nhead=nhead, qkv_bias=True),
+            #         nn.LayerNorm(d_model, eps=1e-6),
+            #         mlp(in_features=d_model, hidden_features=ffn_hidden, out_features=d_model, act_layer=nn.functional.gelu))
+            # self.blocks.append(copy.deepcopy(block))
 
         #--------------------------- Last Layer ------------------------------#
+        self.norm = nn.LayerNorm(d_model)
         self.fc = nn.Linear(in_features=d_model, out_features=Nclasses)
 
     def forward(self, x) :
@@ -126,10 +144,12 @@ class vit(nn.Module) :
         #     out = out + self.attn1(self.norm1(out))    #residual connection
         #     out = out + self.ffn1(self.norm2(out))    #residual connection
         for block in self.blocks:
-            norm1, attn, norm2, ffn = block
-            out = out + attn(norm1(out))
-            out = out + ffn(norm2(out))
-
+            out = block(out)
+            # norm1, attn, norm2, ffn = block
+            # out = out + attn(norm1(out))
+            # out = out + ffn(norm2(out))
+        
+        out = self.norm(out)
         out = out[:,0]    #connect classifier head only to the class token embedding
         # print(out.shape)
         out = self.fc(out)
