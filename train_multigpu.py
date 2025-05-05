@@ -14,6 +14,8 @@ from torch.profiler import profile, record_function, ProfilerActivity
 from utils import WarmupLinearSchedule
 import gc
 import sys
+from torch.distributed.pipeline.sync import Pipe
+from pynvml import nvmlInit, nvmlDeviceGetHandleByIndex, nvmlDeviceGetPowerUsage, nvmlShutdown
 # torch._dynamo.config.optimize_ddp = False
 torch._dynamo.config.automatic_dynamic_shapes = False
 torch.set_float32_matmul_precision('high')
@@ -87,6 +89,9 @@ def get_vit_config(model_size):
         raise ValueError("Unsupported ViT model size")
 
 def trainepoch(model, epoch, trainloader, criterion, opt, device, rank, run_name) :
+    nvmlInit()
+    handle = nvmlDeviceGetHandleByIndex(rank)
+
     epochloss = 0
     acc = 0
     total = 0
@@ -103,24 +108,54 @@ def trainepoch(model, epoch, trainloader, criterion, opt, device, rank, run_name
     for b, (x,y) in enumerate(trainloader) :
         x, y = x.to(device), y.to(device)
 
-        #forward pass
-        # with record_function("forward"):
-        # print(x.shape)
-        logits = model(x)
-        predicted = torch.argmax(logits, dim=-1)
-        acc += torch.eq(predicted, y).sum()
-        total += y.shape[0]
-        #backward pass
-        loss = criterion(logits, y)
-        # with record_function("backward"):
-        loss.backward()
-        # with record_function("optimizer_step"):
-        opt.step()
-        opt.zero_grad(set_to_none=True)
-        # prof.step()
-        #accumulated loss
-        print("GPU ", device, " ", "Batch ", b, "--------- loss = ", loss.item())
-        epochloss += loss.item()
+                #forward pass
+                with record_function("forward"):
+                    logits = model(x)
+                predicted = torch.argmax(logits, dim=-1)
+                acc += torch.eq(predicted, y).sum()
+                total += y.shape[0]
+                #backward pass
+                loss = criterion(logits, y)
+                with record_function("backward"):
+                    loss.backward()
+                opt.step()
+                opt.zero_grad(set_to_none=True)
+                prof.step()
+                #accumulated loss
+                print("GPU ", device, " ", "Batch ", b, "--------- loss = ", loss.item())
+
+                # TODO: print power consumption perf
+                power = nvmlDeviceGetPowerUsage(handle) / 1000.0  # mW → W
+                print(f"GPU {device} Batch {b} -------- power usage= {power:.2f} Watts")
+
+                epochloss += loss.item()
+        print(prof.key_averages().table(sort_by="self_cuda_memory_usage", row_limit=10))
+        print(prof.key_averages().table(sort_by="self_cpu_memory_usage", row_limit=10))
+
+    # TODO: repeat what if statement profiler is doing
+    else: 
+        for b, (x,y) in enumerate(trainloader) :
+            x, y = x.to(device), y.to(device)
+
+            #forward pass
+            logits = model(x)
+            predicted = torch.argmax(logits, dim=-1)
+            acc += torch.eq(predicted, y).sum()
+            total += y.shape[0]
+            #backward pass
+            loss = criterion(logits, y)
+            loss.backward()
+            opt.step()
+            opt.zero_grad(set_to_none=True)
+            #accumulated loss
+            print("GPU ", device, " ", "Batch ", b, "--------- loss = ", loss.item())
+
+            # TODO: print power consumption perf
+            power = nvmlDeviceGetPowerUsage(handle) / 1000.0  # mW → W
+            print(f"GPU {device} Batch {b} -------- power usage= {power:.2f} Watts")
+
+            epochloss += loss.item()
+    nvmlShutdown()
     return model, epochloss/b, acc/total
 
 def train(rank, world_size, model_size='base16', num_epoch=5, use_optimization=False):
