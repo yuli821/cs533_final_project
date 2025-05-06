@@ -12,26 +12,24 @@ import numpy as np
 from ViT import vit
 from torch.profiler import profile, record_function, ProfilerActivity
 from utils import WarmupLinearSchedule
-import gc
-import sys
-from torch.distributed.pipeline.sync import Pipe
 from pynvml import nvmlInit, nvmlDeviceGetHandleByIndex, nvmlDeviceGetPowerUsage, nvmlShutdown
 # torch._dynamo.config.optimize_ddp = False
 torch._dynamo.config.automatic_dynamic_shapes = False
 torch.set_float32_matmul_precision('high')
 dataset = 'cifar100'
-world_size = torch.cuda.device_count()
-image_size = 224
-global_batch_size = 128
-batch_size = global_batch_size // world_size
+image_size = 32
+batch_size = 64
+rank = int(os.environ["SLURM_PROCID"])
+world_size = int(os.environ["SLURM_NTASKS"])
 
 def setup(rank, world_size):
     # os.environ['MASTER_ADDR'] = 'localhost'
     # os.environ['MASTER_PORT'] = '12355'
-    os.environ["NCCL_DEBUG"] = "INFO"
-    os.environ["TORCH_DISTRIBUTED_DEBUG"] = "DETAIL"
     torch.cuda.set_device(rank)
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
+
+def cleanup():
+    dist.destroy_process_group()
 
 def getdata(dataset='cifar10', image_size=32, batch_size=batch_size, num_workers=4, rank=0, world_size=1):
     train_transform = transforms.Compose([transforms.RandomCrop(image_size, image_size),
@@ -59,8 +57,8 @@ def getdata(dataset='cifar10', image_size=32, batch_size=batch_size, num_workers
 
         #train and test dataloaders
         train_sampler = DistributedSampler(trainset, num_replicas=world_size, rank=rank)
-        trainloader = DataLoader(trainset, batch_size=batch_size, sampler=train_sampler, pin_memory=True, num_workers=num_workers)
-        testloader = DataLoader(testset, batch_size=batch_size, pin_memory=True, num_workers=num_workers)
+        trainloader = DataLoader(dataset=trainset, batch_size=batch_size, sampler=train_sampler, shuffle=True, pin_memory=True, num_workers=num_workers)
+        testloader = DataLoader(dataset=testset, batch_size=batch_size, pin_memory=True, num_workers=num_workers)
     else:
         raise ValueError("Dataset not supported")
 
@@ -95,18 +93,16 @@ def trainepoch(model, epoch, trainloader, criterion, opt, device, rank, run_name
     epochloss = 0
     acc = 0
     total = 0
-    # with profile(
-    #     activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA],
-    #     record_shapes=True,
-    #     with_stack=True,
-    #     with_modules=True,
-    #     profile_memory=True,
-    #     schedule=torch.profiler.schedule(wait=1, warmup=2, active=5),
-    #     with_flops=True,
-    #     on_trace_ready=torch.profiler.tensorboard_trace_handler(f'/u/yuli9/cs533_final_project/log/{run_name}/rank_{rank}')
-    # ) as prof:
-    for b, (x,y) in enumerate(trainloader) :
-        x, y = x.to(device), y.to(device)
+    if epoch == 1:
+        with profile(
+            activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            record_shapes=True,
+            profile_memory=True,
+            with_flops=True,
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(f'/u/yuli9/cs533_final_project/log/{run_name}/rank_{rank}')
+        ) as prof:
+            for b, (x,y) in enumerate(trainloader) :
+                x, y = x.to(device), y.to(device)
 
                 #forward pass
                 with record_function("forward"):
@@ -160,7 +156,7 @@ def trainepoch(model, epoch, trainloader, criterion, opt, device, rank, run_name
 
 def train(rank, world_size, model_size='base16', num_epoch=5, use_optimization=False):
     run_name = f"{model_size}_{'opt' if use_optimization else 'noopt'}"
-    setup(rank, world_size)
+    # setup(rank, world_size)
     device = torch.device(f"cuda:{rank}")
     print("Beginning training on ", device)
 
@@ -178,18 +174,17 @@ def train(rank, world_size, model_size='base16', num_epoch=5, use_optimization=F
         # torch._dynamo.config.optimize_ddp: general optimization on operator fusion, loop unrolling, and memory reuse inside DDP
         # gradient_as_bucket_view: optimization on communication
         torch._dynamo.config.optimize_ddp = True
-        # model = torch.compile(model)
+        model = torch.compile(model)
         model = DDP(model, device_ids=[rank], find_unused_parameters=False, gradient_as_bucket_view=True)
     else:
         # torch._dynamo.config.optimize_ddp: general optimization on operator fusion, loop unrolling, and memory reuse inside DDP
         # gradient_as_bucket_view: optimization on communication
         torch._dynamo.config.optimize_ddp = False
-        # model = torch.compile(model)
+        model = torch.compile(model)
         model = DDP(model, device_ids=[rank], find_unused_parameters=False, gradient_as_bucket_view=False)
-    print(f"[Rank {rank}] Peak memory after model creation: {torch.cuda.max_memory_allocated() / 1024**2:.2f} MB")
+
     criterion = nn.CrossEntropyLoss()
-    # optimizer = optim.SGD(model.parameters(), lr=3e-3, momentum=0.9, weight_decay=0.3)
-    optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=0.05)
+    optimizer = optim.SGD(model.parameters(), lr=3e-3, momentum=0.9, weight_decay=0.3)
     scheduler = WarmupLinearSchedule(optimizer, warmup_steps=1, t_total=num_epoch)
 
     model.train()
@@ -203,26 +198,19 @@ def train(rank, world_size, model_size='base16', num_epoch=5, use_optimization=F
     if rank == 0:
         torch.save(model.module.state_dict(), f"/u/yuli9/cs533_final_project/models/{dataset}/final_{model_size}.pt")
 
-    del model, trainloader, testloader, optimizer, criterion
-    torch.cuda.empty_cache()
-    gc.collect()
-    dist.destroy_process_group()
-    return
+    cleanup()
 
 def main():
-    # world_size = torch.cuda.device_count()
+    world_size = torch.cuda.device_count()
     use_optimization = True  # Toggle this flag to enable/disable comm optimization
     model_size = 'huge16'      # Change to 'large' or 'huge' as needed
-    num_epoch = 1
+    num_epoch = 5
     torch.manual_seed(0)
     torch.cuda.manual_seed_all(0)
     np.random.seed(0)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-
-    rank = int(os.environ["SLURM_PROCID"])
-    torch.cuda.empty_cache()
-    gc.collect()
+    setup(rank, world_size)
     print("\n[INFO] Running WITHOUT communication optimization\n")
     # mp.spawn(train, args=(world_size, model_size, num_epoch, False), nprocs=world_size, join=True)
     train(rank, world_size, model_size, num_epoch, False)

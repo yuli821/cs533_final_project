@@ -15,6 +15,7 @@ from utils import WarmupLinearSchedule
 import gc
 import sys
 from torch.distributed.pipelining import pipeline, SplitPoint, ScheduleGPipe, PipelineStage
+from pynvml import nvmlInit, nvmlDeviceGetHandleByIndex, nvmlDeviceGetPowerUsage, nvmlShutdown
 
 # torch._dynamo.config.optimize_ddp = False
 torch._dynamo.config.automatic_dynamic_shapes = False
@@ -176,43 +177,49 @@ def main():
 
     # Run the pipeline with input `x`. Divide the batch into 4 micro-batches
     # and run them in parallel on the pipeline
-    with profile(
-        activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA],
-        record_shapes=True,
-        with_stack=True,
-        with_modules=True,
-        profile_memory=True,
-        schedule=torch.profiler.schedule(wait=1, warmup=2, active=1),
-        with_flops=True,
-        on_trace_ready=torch.profiler.tensorboard_trace_handler(f'/u/yuli9/cs533_final_project/log_pipe/{model_size}/rank_{rank}')
-    ) as prof:
-        for epoch in range(num_epoch):
-            train_sampler.set_epoch(epoch)
-            for b, (x,y) in enumerate(trainloader) :
-                x, y = x.to(device), y.to(device)
-                with record_function(f"pipeline_schedule_{rank}"):
-                    if rank == 0:
-                        schedule.step(x)
-                        optimizer.step()
-                        optimizer.zero_grad(set_to_none=True)
-                    elif rank == world_size - 1:
-                        losses = []
-                        output = schedule.step(target=y, losses=losses)
-                        optimizer.step()
-                        optimizer.zero_grad(set_to_none=True)
-                        print(f"Epoch {epoch} Batch {b}")
-                        for loss in losses:
-                            print(f"Loss: {loss.item():.4f}")
-                    else:
-                        schedule.step()
-                        optimizer.step()
-                        optimizer.zero_grad(set_to_none=True)
-                prof.step()
-            scheduler.step()
+    # with profile(
+    #     activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA],
+    #     record_shapes=True,
+    #     with_stack=True,
+    #     with_modules=True,
+    #     profile_memory=True,
+    #     schedule=torch.profiler.schedule(wait=1, warmup=2, active=1),
+    #     with_flops=True,
+    #     on_trace_ready=torch.profiler.tensorboard_trace_handler(f'/u/yuli9/cs533_final_project/log_pipe/{model_size}/rank_{rank}')
+    # ) as prof:
+ 
+    for epoch in range(num_epoch):
+        nvmlInit()
+        handle = nvmlDeviceGetHandleByIndex(rank)
+        train_sampler.set_epoch(epoch)
+        for b, (x,y) in enumerate(trainloader) :
+            x, y = x.to(device), y.to(device)
+            # with record_function(f"pipeline_schedule_{rank}"):
+            if rank == 0:
+                schedule.step(x)
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+            elif rank == world_size - 1:
+                losses = []
+                output = schedule.step(target=y, losses=losses)
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                print(f"Epoch {epoch} Batch {b}")
+                for loss in losses:
+                    print(f"Loss: {loss.item():.4f}")
+            else:
+                schedule.step()
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+            prof.step()
+            power = nvmlDeviceGetPowerUsage(handle) / 1000.0  # mW → W
+        scheduler.step()
+        print(prof.key_averages().table(sort_by="self_cuda_memory_usage", row_limit=10))
+        print(prof.key_averages().table(sort_by="self_cpu_memory_usage", row_limit=10))
 
     # if rank == 0:
     #     torch.save(model.module.state_dict(), f"/u/yuli9/cs533_final_project/models/{dataset}/final_{model_size}_pipe.pt")
-
+    nvmlShutdown()
     del trainloader, testloader, optimizer, criterion
     torch.cuda.empty_cache()
     gc.collect()

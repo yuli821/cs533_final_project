@@ -24,4 +24,5 @@ master_addr=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
 export MASTER_ADDR=$master_addr
 echo "MASTER_ADDR="$MASTER_ADDR
 
-srun python3 $HOME/cs533_final_project/pipeline.py
+# srun python3 $HOME/cs533_final_project/pipeline.py
+srun nsys profile -o output_profile --stats=true python3 $HOME/cs533_final_project/pipeline.py nvidia-smi 
