@@ -10,6 +10,7 @@
 #SBATCH --partition=gpuA40x4
 #SBATCH --account=beih-delta-gpu
 #SBATCH --output=training.out
+#SBATCH --constraint=perf,nvperf
 
 module load nccl
 
@@ -23,6 +24,5 @@ echo "WORLD_SIZE="$WORLD_SIZE
 master_addr=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
 export MASTER_ADDR=$master_addr
 echo "MASTER_ADDR="$MASTER_ADDR
-
-# srun python3 $HOME/cs533_final_project/pipeline.py
-srun nsys profile -o output_profile --stats=true python3 $HOME/cs533_final_project/pipeline.py nvidia-smi 
+model_size="huge32"
+srun ./profile_rank.sh "$model_size"

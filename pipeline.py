@@ -16,6 +16,9 @@ import gc
 import sys
 from torch.distributed.pipelining import pipeline, SplitPoint, ScheduleGPipe, PipelineStage
 from pynvml import nvmlInit, nvmlDeviceGetHandleByIndex, nvmlDeviceGetPowerUsage, nvmlShutdown
+import argparse
+from torch.cuda import cudart, check_error
+import torch.cuda.nvtx as nvtx
 
 # torch._dynamo.config.optimize_ddp = False
 torch._dynamo.config.automatic_dynamic_shapes = False
@@ -23,8 +26,8 @@ torch.set_float32_matmul_precision('high')
 dataset = 'cifar100'
 rank = int(os.environ["SLURM_PROCID"])
 world_size = int(os.environ["SLURM_NTASKS"])
-image_size = 224
-global_batch_size = 128
+image_size = 32
+global_batch_size = 64
 batch_size = global_batch_size // world_size
 chunks = world_size
 
@@ -52,7 +55,7 @@ def getdata(dataset='cifar10', image_size=32, batch_size=batch_size, num_workers
         trainset = datasets.CIFAR10(root="/projects/beih/yuli9/datasets", train=True, transform=train_transform, download=False)
         testset = datasets.CIFAR10(root="/projects/beih/yuli9/datasets", train=False, transform=test_transform, download=False)
 
-        train_sampler = DistributedSampler(trainset, num_replicas=world_size, rank=rank)
+        train_sampler = None
         trainloader = DataLoader(trainset, batch_size=batch_size, sampler=train_sampler, num_workers=num_workers, pin_memory=True, drop_last=True)
         testloader = DataLoader(testset, batch_size=batch_size, num_workers=num_workers, pin_memory=True)
     elif dataset == "cifar100":
@@ -61,7 +64,7 @@ def getdata(dataset='cifar10', image_size=32, batch_size=batch_size, num_workers
         testset = datasets.CIFAR100(root="/projects/beih/yuli9/datasets/", train=False, transform=test_transform, download=True)
 
         #train and test dataloaders
-        train_sampler = DistributedSampler(trainset, num_replicas=world_size, rank=rank)
+        train_sampler = None
         trainloader = DataLoader(trainset, batch_size=batch_size, sampler=train_sampler, pin_memory=True, num_workers=num_workers, drop_last=True)
         testloader = DataLoader(testset, batch_size=batch_size, pin_memory=True, num_workers=num_workers)
     else:
@@ -94,7 +97,7 @@ def get_vit_config(model_size):
 def main():
     # world_size = torch.cuda.device_count()
     use_optimization = True  # Toggle this flag to enable/disable comm optimization
-    model_size = 'huge16'      # Change to 'large' or 'huge' as needed
+    # model_size = 'huge16'      # Change to 'large' or 'huge' as needed
     num_epoch = 5
     torch.manual_seed(0)
     torch.cuda.manual_seed_all(0)
@@ -104,6 +107,15 @@ def main():
 
     torch.cuda.empty_cache()
     gc.collect()
+
+    parser = argparse.ArgumentParser(description="Distributed ViT Training")
+    parser.add_argument("model_size", choices=[
+        'base4','large4','huge4',
+        'base16','large16','huge16',
+        'base32','large32','huge32'
+    ], help="ViT model size to train")
+    args, unknown = parser.parse_known_args()
+    model_size = args.model_size # 'huge4'      # Change to 'large' or 'huge' as needed
     # print("\n[INFO] Running WITHOUT communication optimization\n")
     # mp.spawn(train, args=(world_size, model_size, num_epoch, False), nprocs=world_size, join=True) #data parallelism
 
@@ -129,8 +141,19 @@ def main():
     assert config["mlp_dim"] % config["d_model"] == 0
     mlp_ratio = config["mlp_dim"] / config["d_model"]
     model = vit(ipch=3, image_size=image_size, Nclasses=nclasses, num_layers=config["num_layers"], patch_size=config["patch_size"],d_model=config["d_model"], nhead=config["nhead"], mlp_ratio=mlp_ratio).to(device)
-    trainloader, testloader, train_sampler = getdata(image_size=image_size, batch_size=global_batch_size, rank=rank, world_size=world_size)
-    example_input = torch.randn(batch_size, 3, 224, 224, device=device)
+    # trainloader, testloader, train_sampler = getdata(image_size=image_size, batch_size=global_batch_size, rank=rank, world_size=world_size)
+    # if rank == 0:
+    trainloader, testloader, train_sampler = getdata(
+        dataset= dataset,
+        image_size=image_size,
+        batch_size=global_batch_size,
+        rank=0,
+        world_size=1  # Don't partition dataset
+    )
+    # else:
+        # trainloader, testloader, train_sampler = None, None, None
+    
+    example_input = torch.randn(batch_size, 3, image_size, image_size, device=device)
     if config["num_layers"] == 32:
         num_stages = 4
         split_spec = {
@@ -138,7 +161,7 @@ def main():
             'blocks.15': SplitPoint.END,
             'blocks.23': SplitPoint.END
         }
-    elif config["num_layer"] == 24:
+    elif config["num_layers"] == 24:
         num_stages = 4
         split_spec = {
             'blocks.5': SplitPoint.END,
@@ -177,52 +200,111 @@ def main():
 
     # Run the pipeline with input `x`. Divide the batch into 4 micro-batches
     # and run them in parallel on the pipeline
-    # with profile(
-    #     activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA],
-    #     record_shapes=True,
-    #     with_stack=True,
-    #     with_modules=True,
-    #     profile_memory=True,
-    #     schedule=torch.profiler.schedule(wait=1, warmup=2, active=1),
-    #     with_flops=True,
-    #     on_trace_ready=torch.profiler.tensorboard_trace_handler(f'/u/yuli9/cs533_final_project/log_pipe/{model_size}/rank_{rank}')
-    # ) as prof:
- 
+    dist.barrier()
+    check_error(cudart().cudaProfilerStart())
     for epoch in range(num_epoch):
         nvmlInit()
         handle = nvmlDeviceGetHandleByIndex(rank)
-        train_sampler.set_epoch(epoch)
-        for b, (x,y) in enumerate(trainloader) :
-            x, y = x.to(device), y.to(device)
-            # with record_function(f"pipeline_schedule_{rank}"):
-            if rank == 0:
+        # train_sampler.set_epoch(epoch)
+        # with profile(
+        #     activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA],
+        #     record_shapes=True,
+        #     with_stack=True,
+        #     with_modules=True,
+        #     profile_memory=True,
+        #     schedule=torch.profiler.schedule(wait=10, warmup=0, active=5, repeat=1),
+        #     with_flops=True,
+        #     on_trace_ready=torch.profiler.tensorboard_trace_handler(f'/work/hdd/beih/yuli9/log_pipe/{model_size}/rank_{rank}')
+        # ) as prof:
+        for b, (x, y) in enumerate(trainloader) :
+            # x, y = x.to(device), y.to(device)
+            if rank == 0: 
+                x = x.to(device)
+                # with record_function("rank0_pipeline_step"):
+                nvtx.range_push(f"Rank {rank} - Forward Step")
                 schedule.step(x)
+                nvtx.range_pop()
+                nvtx.range_push(f"Rank {rank} - Optimizer Step")
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
+                nvtx.range_pop()
+                power = nvmlDeviceGetPowerUsage(handle) / 1000.0  # mW → W
+                print(f"GPU {device} Batch {b} -------- power usage= {power:.2f} Watts")
             elif rank == world_size - 1:
+                y = y.to(device)
+                # with record_function("rank3_pipeline_step"):
+                nvtx.range_push(f"Rank {rank} - Forward Step")
                 losses = []
                 output = schedule.step(target=y, losses=losses)
+                nvtx.range_pop()
+
+                nvtx.range_push(f"Rank {rank} - Optimizer Step")
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
+                nvtx.range_pop()
                 print(f"Epoch {epoch} Batch {b}")
                 for loss in losses:
                     print(f"Loss: {loss.item():.4f}")
+                power = nvmlDeviceGetPowerUsage(handle) / 1000.0  # mW → W
+                print(f"GPU {device} Batch {b} -------- power usage= {power:.2f} Watts")
             else:
+                # with record_function(f"rank{rank}_pipeline_step"):
+                nvtx.range_push(f"Rank {rank} - Forward Step")
                 schedule.step()
+                nvtx.range_pop()
+
+                nvtx.range_push(f"Rank {rank} - Optimizer Step")
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
-            prof.step()
-            power = nvmlDeviceGetPowerUsage(handle) / 1000.0  # mW → W
+                nvtx.range_pop()
+                power = nvmlDeviceGetPowerUsage(handle) / 1000.0  # mW → W
+                print(f"GPU {device} Batch {b} -------- power usage= {power:.2f} Watts")
+                # prof.step()
         scheduler.step()
-        print(prof.key_averages().table(sort_by="self_cuda_memory_usage", row_limit=10))
-        print(prof.key_averages().table(sort_by="self_cpu_memory_usage", row_limit=10))
+        # for b, (x,y) in enumerate(trainloader) :
+        #     x, y = x.to(device), y.to(device)
+        #     # with record_function(f"pipeline_schedule_{rank}"):
+        #     if rank == 0:
+        #         nvtx.range_push(f"Rank {rank} - Forward Step")
+        #         schedule.step(x)
+        #         nvtx.range_pop()
+        #         nvtx.range_push(f"Rank {rank} - Optimizer Step")
+        #         optimizer.step()
+        #         optimizer.zero_grad(set_to_none=True)
+        #         nvtx.range_pop()
+        #     elif rank == world_size - 1:
+        #         nvtx.range_push(f"Rank {rank} - Forward Step")
+        #         losses = []
+        #         output = schedule.step(target=y, losses=losses)
+        #         nvtx.range_pop()
 
-    # if rank == 0:
-    #     torch.save(model.module.state_dict(), f"/u/yuli9/cs533_final_project/models/{dataset}/final_{model_size}_pipe.pt")
+        #         nvtx.range_push(f"Rank {rank} - Optimizer Step")
+        #         optimizer.step()
+        #         optimizer.zero_grad(set_to_none=True)
+        #         nvtx.range_pop()
+        #         print(f"Epoch {epoch} Batch {b}")
+        #         for loss in losses:
+        #             print(f"Loss: {loss.item():.4f}")
+        #     else:
+        #         nvtx.range_push(f"Rank {rank} - Forward Step")
+        #         schedule.step()
+        #         nvtx.range_pop()
+
+        #         nvtx.range_push(f"Rank {rank} - Optimizer Step")
+        #         optimizer.step()
+        #         optimizer.zero_grad(set_to_none=True)
+        #         nvtx.range_pop()
+        #     prof.step()
+        #     power = nvmlDeviceGetPowerUsage(handle) / 1000.0  # mW → W
+    dist.barrier()
+    check_error(torch.cuda.cudart().cudaProfilerStop())
+    # torch.distributed.barrier()
     nvmlShutdown()
-    del trainloader, testloader, optimizer, criterion
+    if trainloader != None:
+        del trainloader, testloader, optimizer, criterion
     torch.cuda.empty_cache()
     gc.collect()
+    dist.barrier()
     dist.destroy_process_group()
 
 if __name__ == "__main__":

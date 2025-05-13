@@ -19,7 +19,7 @@ def parse_trace_json(file_path):
         dur = evt.get("dur", 0)
         name = evt.get("name", "").lower()
         cat = evt.get("cat", "").lower()
-        if "nccl" in name and ("allreduce" in name or "broadcast" in name):
+        if "nccl" in name and ("allreduce" in name or "broadcast" in name or "all_reduce" in name):
             comm_time_us += dur
         if cat != "cpu_op" and cat != "user_annotation":
             # if cat not in cat_dict:
@@ -59,6 +59,6 @@ def print_report(results):
         print(f"{config:<20} | {comm_ms:15.2f} | {total_ms:15.2f} | {percent:8.2f}%")
 
 if __name__ == "__main__":
-    log_dir = "./log"
+    log_dir = "/work/hdd/beih/yuli9/log_pipe"
     results = analyze_logs(log_dir)
     print_report(results)

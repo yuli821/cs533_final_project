@@ -212,8 +212,8 @@ def main():
     torch.backends.cudnn.benchmark = False
     setup(rank, world_size)
     print("\n[INFO] Running WITHOUT communication optimization\n")
-    # mp.spawn(train, args=(world_size, model_size, num_epoch, False), nprocs=world_size, join=True)
-    train(rank, world_size, model_size, num_epoch, False)
+    mp.spawn(train, args=(world_size, model_size, num_epoch, False), nprocs=world_size, join=True)
+    # train(rank, world_size, model_size, num_epoch, False)
 
     # print("\n[INFO] Running WITH communication optimization\n")
     # mp.spawn(train, args=(world_size, model_size, num_epoch, True), nprocs=world_size, join=True)
